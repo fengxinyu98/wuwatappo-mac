@@ -9,6 +9,9 @@
 
 use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -37,6 +40,7 @@ extern "C" {
         user_info: *mut c_void,
     ) -> Ref;
     fn CGEventTapEnable(tap: Ref, enable: bool);
+    fn CGEventTapIsEnabled(tap: Ref) -> bool;
     fn CGEventGetLocation(event: Ref) -> CGPoint;
     fn CGEventGetIntegerValueField(event: Ref, field: u32) -> i64;
     fn CGEventGetFlags(event: Ref) -> u64;
@@ -78,50 +82,65 @@ const FIELD_KEY_AUTOREPEAT: u32 = 8;
 const FIELD_KEY_CODE: u32 = 9;
 
 const MOVE_EMIT_INTERVAL: Duration = Duration::from_millis(8);
+const WATCHDOG_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Event data copied out of the CGEvent inside the tap callback. The callback must
+/// return quickly or macOS disables the tap, so all work (hit-testing, window queries
+/// that wait on the main thread, emitting) happens on a separate worker thread.
+enum Raw {
+    Move { x: f64, y: f64 },
+    Button { button: &'static str, press: bool, x: f64, y: f64 },
+    Key { name: String, press: bool },
+    /// Press immediately followed by release (Caps Lock only reports its lock state).
+    KeyTap { name: String },
+}
 
 struct Ctx {
-    app: AppHandle,
-    tap: Ref,
-    last_move: Instant,
+    tx: Sender<Raw>,
+    tap: Arc<AtomicPtr<c_void>>,
 }
 
 pub fn start(app: AppHandle) {
+    let (tx, rx) = channel::<Raw>();
+    let worker_app = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("global-input-worker".into())
+        .spawn(move || worker(worker_app, rx));
+
     let mouse_mask = mask(&[
         LEFT_DOWN, LEFT_UP, RIGHT_DOWN, RIGHT_UP, MOUSE_MOVED, LEFT_DRAGGED, RIGHT_DRAGGED,
         OTHER_DOWN, OTHER_UP, OTHER_DRAGGED,
     ]);
     let key_mask = mask(&[KEY_DOWN, KEY_UP, FLAGS_CHANGED]);
-    spawn_tap(app.clone(), "mouse", mouse_mask);
-    spawn_tap(app, "keyboard", key_mask);
+    spawn_tap(app.clone(), tx.clone(), "mouse", mouse_mask);
+    spawn_tap(app, tx, "keyboard", key_mask);
 }
 
 fn mask(types: &[u32]) -> u64 {
     types.iter().fold(0, |m, t| m | (1u64 << t))
 }
 
-fn spawn_tap(app: AppHandle, kind: &'static str, mask: u64) {
+fn spawn_tap(app: AppHandle, tx: Sender<Raw>, kind: &'static str, mask: u64) {
     let _ = std::thread::Builder::new()
         .name(format!("global-{kind}-tap"))
-        .spawn(move || unsafe { run_tap(app, kind, mask) });
+        .spawn(move || unsafe { run_tap(app, tx, kind, mask) });
 }
 
-unsafe fn run_tap(app: AppHandle, kind: &str, mask: u64) {
+unsafe fn run_tap(app: AppHandle, tx: Sender<Raw>, kind: &'static str, mask: u64) {
     if kind == "keyboard" && !CGPreflightListenEventAccess() {
         CGRequestListenEventAccess();
     }
-    let ctx = Box::into_raw(Box::new(Ctx {
-        app: app.clone(),
-        tap: std::ptr::null_mut(),
-        last_move: Instant::now(),
-    }));
+    let tap_slot = Arc::new(AtomicPtr::new(std::ptr::null_mut()));
+    let ctx = Box::into_raw(Box::new(Ctx { tx, tap: tap_slot.clone() }));
     let mut warned = false;
     loop {
         let tap = CGEventTapCreate(SESSION_TAP, HEAD_INSERT, LISTEN_ONLY, mask, callback, ctx.cast());
         if !tap.is_null() {
-            (*ctx).tap = tap;
+            tap_slot.store(tap, Ordering::Release);
             let source = CFMachPortCreateRunLoopSource(std::ptr::null_mut(), tap, 0);
             CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes);
             CGEventTapEnable(tap, true);
+            spawn_watchdog(app.clone(), kind, tap_slot.clone());
             applog::write(&app, "info", &format!("[INPUT] {kind} tap started"));
             CFRunLoopRun();
             return;
@@ -138,79 +157,126 @@ unsafe fn run_tap(app: AppHandle, kind: &str, mask: u64) {
     }
 }
 
+/// Re-enables the tap if macOS disabled it and the in-callback re-enable was missed.
+fn spawn_watchdog(app: AppHandle, kind: &'static str, tap: Arc<AtomicPtr<c_void>>) {
+    let _ = std::thread::Builder::new()
+        .name(format!("global-{kind}-watchdog"))
+        .spawn(move || loop {
+            std::thread::sleep(WATCHDOG_INTERVAL);
+            let t = tap.load(Ordering::Acquire);
+            unsafe {
+                if !t.is_null() && !CGEventTapIsEnabled(t) {
+                    CGEventTapEnable(t, true);
+                    applog::write(&app, "warn", &format!("[INPUT] {kind} tap was disabled, re-enabled"));
+                }
+            }
+        });
+}
+
 unsafe extern "C" fn callback(_proxy: Ref, etype: u32, event: Ref, user: *mut c_void) -> Ref {
-    let ctx = &mut *(user as *mut Ctx);
+    let ctx = &*(user as *const Ctx);
     if etype == TAP_DISABLED_BY_TIMEOUT || etype == TAP_DISABLED_BY_USER_INPUT {
-        if !ctx.tap.is_null() {
-            CGEventTapEnable(ctx.tap, true);
+        let t = ctx.tap.load(Ordering::Acquire);
+        if !t.is_null() {
+            CGEventTapEnable(t, true);
         }
         return event;
     }
-    let _ = catch_unwind(AssertUnwindSafe(|| handle(ctx, etype, event)));
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if let Some(raw) = read_event(etype, event) {
+            let _ = ctx.tx.send(raw);
+        }
+    }));
     event
 }
 
-unsafe fn handle(ctx: &mut Ctx, etype: u32, event: Ref) {
+unsafe fn read_event(etype: u32, event: Ref) -> Option<Raw> {
     match etype {
         MOUSE_MOVED | LEFT_DRAGGED | RIGHT_DRAGGED | OTHER_DRAGGED => {
             let p = CGEventGetLocation(event);
-            hit::update_capture(&ctx.app, Some((p.x, p.y)));
-            let now = Instant::now();
-            if now.duration_since(ctx.last_move) < MOVE_EMIT_INTERVAL {
-                return;
-            }
-            ctx.last_move = now;
-            let s = hit::scale(&ctx.app);
-            let _ = ctx.app.emit_to("main", "mouse-move", json!({ "x": p.x * s, "y": p.y * s }));
+            Some(Raw::Move { x: p.x, y: p.y })
         }
         LEFT_DOWN | LEFT_UP | RIGHT_DOWN | RIGHT_UP | OTHER_DOWN | OTHER_UP => {
             let p = CGEventGetLocation(event);
-            hit::update_capture(&ctx.app, Some((p.x, p.y)));
-            if hit::over_own_window(&ctx.app, p.x, p.y) {
-                return;
-            }
             let button = match etype {
                 LEFT_DOWN | LEFT_UP => "left",
                 RIGHT_DOWN | RIGHT_UP => "right",
                 _ if CGEventGetIntegerValueField(event, FIELD_MOUSE_BUTTON_NUMBER) == 2 => "middle",
                 _ => "unknown",
             };
-            let action = match etype {
-                LEFT_DOWN | RIGHT_DOWN | OTHER_DOWN => "press",
-                _ => "release",
-            };
-            let s = hit::scale(&ctx.app);
-            let _ = ctx.app.emit_to(
-                "main",
-                "mouse-button",
-                json!({ "button": button, "action": action, "x": p.x * s, "y": p.y * s }),
-            );
+            let press = matches!(etype, LEFT_DOWN | RIGHT_DOWN | OTHER_DOWN);
+            Some(Raw::Button { button, press, x: p.x, y: p.y })
         }
         KEY_DOWN | KEY_UP => {
             if etype == KEY_DOWN && CGEventGetIntegerValueField(event, FIELD_KEY_AUTOREPEAT) != 0 {
-                return;
+                return None;
             }
             let name = key_name(CGEventGetIntegerValueField(event, FIELD_KEY_CODE));
-            let ev = if etype == KEY_DOWN { "key-press" } else { "key-release" };
-            let _ = ctx.app.emit_to("main", ev, name);
+            Some(Raw::Key { name, press: etype == KEY_DOWN })
         }
         FLAGS_CHANGED => {
             let code = CGEventGetIntegerValueField(event, FIELD_KEY_CODE);
-            let Some(bit) = modifier_bit(code) else { return };
+            let bit = modifier_bit(code)?;
             let name = key_name(code);
             if code == 57 {
-                // Caps Lock reports lock state, not key state: treat each change as a tap.
-                let _ = ctx.app.emit_to("main", "key-press", name.clone());
-                let _ = ctx.app.emit_to("main", "key-release", name);
-                return;
+                return Some(Raw::KeyTap { name });
             }
-            let pressed = CGEventGetFlags(event) & bit != 0;
-            let ev = if pressed { "key-press" } else { "key-release" };
-            let _ = ctx.app.emit_to("main", ev, name);
+            Some(Raw::Key { name, press: CGEventGetFlags(event) & bit != 0 })
         }
-        _ => {}
+        _ => None,
     }
 }
+
+fn worker(app: AppHandle, rx: Receiver<Raw>) {
+    let mut last_move = Instant::now() - MOVE_EMIT_INTERVAL;
+    let mut pending: Vec<Raw> = Vec::new();
+    while let Ok(first) = rx.recv() {
+        pending.push(first);
+        pending.extend(rx.try_iter());
+        // Coalesce runs of moves: only the last position of each run matters.
+        let mut iter = std::mem::take(&mut pending).into_iter().peekable();
+        while let Some(ev) = iter.next() {
+            let next_is_move = matches!(iter.peek(), Some(Raw::Move { .. }));
+            match ev {
+                Raw::Move { x, y } => {
+                    if next_is_move {
+                        continue;
+                    }
+                    hit::update_capture(&app, Some((x, y)));
+                    let now = Instant::now();
+                    if now.duration_since(last_move) < MOVE_EMIT_INTERVAL {
+                        continue;
+                    }
+                    last_move = now;
+                    let s = hit::scale(&app);
+                    let _ = app.emit_to("main", "mouse-move", json!({ "x": x * s, "y": y * s }));
+                }
+                Raw::Button { button, press, x, y } => {
+                    hit::update_capture(&app, Some((x, y)));
+                    if hit::over_own_window(&app, x, y) {
+                        continue;
+                    }
+                    let s = hit::scale(&app);
+                    let action = if press { "press" } else { "release" };
+                    let _ = app.emit_to(
+                        "main",
+                        "mouse-button",
+                        json!({ "button": button, "action": action, "x": x * s, "y": y * s }),
+                    );
+                }
+                Raw::Key { name, press } => {
+                    let ev = if press { "key-press" } else { "key-release" };
+                    let _ = app.emit_to("main", ev, name);
+                }
+                Raw::KeyTap { name } => {
+                    let _ = app.emit_to("main", "key-press", name.clone());
+                    let _ = app.emit_to("main", "key-release", name);
+                }
+            }
+        }
+    }
+}
+
 
 fn modifier_bit(code: i64) -> Option<u64> {
     Some(match code {

@@ -37,6 +37,10 @@ function makeEnv() {
 }
 
 (async () => {
+  // ---- main overlay script: syntax only (needs a real DOM to run)
+  new vm.Script(script('MAIN_INIT_SCRIPT'));
+  console.log('main init script: syntax ok');
+
   // ---- cookie shim
   {
     const { ctx } = makeEnv();

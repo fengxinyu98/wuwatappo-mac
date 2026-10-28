@@ -27,14 +27,20 @@ const MAIN_INIT_SCRIPT: &str = r#"
   const types = ['pointerdown','pointerup','pointermove','pointerover','pointerout',
     'pointerenter','pointerleave','pointercancel','mousedown','mouseup','mousemove',
     'mouseover','mouseout','mouseenter','mouseleave','click','dblclick','auxclick',
-    'contextmenu','wheel'];
+    'contextmenu','wheel','dragstart','selectstart'];
+  const cancel = new Set(['contextmenu','wheel','dragstart','selectstart']);
   for (const t of types) {
     window.addEventListener(t, (e) => {
       if (!e.isTrusted) return;
       e.stopImmediatePropagation();
-      if (t === 'contextmenu' || t === 'wheel') e.preventDefault();
+      if (cancel.has(t)) e.preventDefault();
     }, { capture: true, passive: false });
   }
+  // A native WebKit image/text drag would start an AppKit drag session the frontend
+  // never expects (Windows never delivers real mouse input to this WebView).
+  const style = document.createElement('style');
+  style.textContent = '*{-webkit-user-drag:none!important;-webkit-user-select:none!important}';
+  (document.head || document.documentElement).appendChild(style);
 })();
 "#;
 
