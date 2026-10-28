@@ -101,6 +101,24 @@ pub fn update_capture(app: &AppHandle, cursor: Option<(f64, f64)>) {
     }
 }
 
+/// True if global logical point (gx, gy) is over one of our own visible windows other
+/// than the overlays. Those windows report their own clicks (e.g. the panel sends a
+/// `pet-clap` action), so the global listener must not count them again — same as
+/// the Windows build.
+pub fn over_own_window(app: &AppHandle, gx: f64, gy: f64) -> bool {
+    app.webview_windows().iter().any(|(label, w)| {
+        if label == "main" || label == "toast" || !w.is_visible().unwrap_or(false) {
+            return false;
+        }
+        let (Ok(scale), Ok(pos), Ok(size)) = (w.scale_factor(), w.outer_position(), w.outer_size()) else {
+            return false;
+        };
+        let (x, y) = (pos.x as f64 / scale, pos.y as f64 / scale);
+        let (wd, ht) = (size.width as f64 / scale, size.height as f64 / scale);
+        gx >= x && gy >= y && gx < x + wd && gy < y + ht
+    })
+}
+
 /// Caches the main window origin/scale so the input thread never has to query the window.
 pub fn refresh_geometry(app: &AppHandle) {
     let Some(main) = app.get_webview_window("main") else { return };

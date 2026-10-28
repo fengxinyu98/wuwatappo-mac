@@ -166,6 +166,9 @@ unsafe fn handle(ctx: &mut Ctx, etype: u32, event: Ref) {
         LEFT_DOWN | LEFT_UP | RIGHT_DOWN | RIGHT_UP | OTHER_DOWN | OTHER_UP => {
             let p = CGEventGetLocation(event);
             hit::update_capture(&ctx.app, Some((p.x, p.y)));
+            if hit::over_own_window(&ctx.app, p.x, p.y) {
+                return;
+            }
             let button = match etype {
                 LEFT_DOWN | LEFT_UP => "left",
                 RIGHT_DOWN | RIGHT_UP => "right",
