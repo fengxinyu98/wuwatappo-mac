@@ -38,7 +38,8 @@ jobs:
         run: |
           KC="$RUNNER_TEMP/signing.keychain-db"
           KC_PW="$(uuidgen)"
-          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/codesign.p12"
+          printf '%s' "$CERT_P12" | tr -d ' \r\n' | base64 --decode > "$RUNNER_TEMP/codesign.p12"
+          CERT_PASSWORD="$(printf '%s' "$CERT_PASSWORD" | tr -d '\r\n')"
           security create-keychain -p "$KC_PW" "$KC"
           security set-keychain-settings -lut 21600 "$KC"
           security unlock-keychain -p "$KC_PW" "$KC"
