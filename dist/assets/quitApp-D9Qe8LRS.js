@@ -1,0 +1,1 @@
+import{dM as a,dN as e,p as r,dO as i}from"./index-DsnG26DH.js";async function o(){await a(),await e();try{await r("exit_app")}catch(t){console.error("[quitApp] exit_app failed",t)}}async function s(){await a(),await e();try{await i()}catch(t){console.error("[restartApp] relaunch failed",t)}}export{o as quitApp,s as restartApp};

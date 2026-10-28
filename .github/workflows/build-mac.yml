@@ -1,0 +1,41 @@
+# Builds "Wuwa Tappo.app" (universal: Apple Silicon + Intel) on a GitHub macOS runner.
+# Run manually from the Actions tab, or push a tag like v1.0.2.
+name: build-mac
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build
+        working-directory: src-tauri
+        run: npx --yes @tauri-apps/cli@2 build --target universal-apple-darwin --bundles app
+
+      - name: Zip app
+        run: |
+          cd "src-tauri/target/universal-apple-darwin/release/bundle/macos"
+          ditto -c -k --keepParent "Wuwa Tappo.app" "$GITHUB_WORKSPACE/WuwaTappo-mac.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WuwaTappo-mac
+          path: WuwaTappo-mac.zip
+          retention-days: 14

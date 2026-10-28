@@ -1,0 +1,6 @@
+src-tauri/target/
+src-tauri/gen/
+__pycache__/
+tools/ctx*.txt
+tools/exports.txt
+.DS_Store
