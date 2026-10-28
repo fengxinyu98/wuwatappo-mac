@@ -1,11 +1,15 @@
 # Builds "Wuwa Tappo.app" (universal: Apple Silicon + Intel) on a GitHub macOS runner.
-# Run manually from the Actions tab, or push a tag like v1.0.2.
+# Push a tag like v1.0.2 to build and publish a GitHub Release with WuwaTappo-mac.zip.
+# Running it manually from the Actions tab only uploads a 14-day build artifact.
 name: build-mac
 
 on:
   workflow_dispatch:
   push:
     tags: ["v*"]
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -39,3 +43,13 @@ jobs:
           name: WuwaTappo-mac
           path: WuwaTappo-mac.zip
           retention-days: 14
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" WuwaTappo-mac.zip \
+            --title "Wuwa Tappo for Mac $GITHUB_REF_NAME" \
+            --notes "解压后把 Wuwa Tappo.app 放进「应用程序」，首次运行前在终端执行：
+          xattr -dr com.apple.quarantine \"/Applications/Wuwa Tappo.app\""
