@@ -12,6 +12,7 @@ mod input_macos;
 mod menu;
 mod store;
 mod windows;
+mod ws_proxy;
 
 use std::sync::Mutex;
 
@@ -484,6 +485,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(Hit(Mutex::new(HitState::default())))
         .manage(Shared::default())
+        .manage(ws_proxy::WsState::default())
         .on_menu_event(|app, event| menu::handle_event(app, event))
         .on_window_event(|window, event| {
             let app = window.app_handle();
@@ -567,6 +569,9 @@ pub fn run() {
             is_elevated_autostart_enabled,
             set_elevated_autostart,
             exit_app,
+            ws_proxy::ws_open,
+            ws_proxy::ws_send,
+            ws_proxy::ws_close,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Wuwa Tappo");

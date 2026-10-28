@@ -8,7 +8,7 @@
   },
   "app": {
     "macOSPrivateApi": true,
-    "withGlobalTauri": false,
+    "withGlobalTauri": true,
     "windows": [],
     "security": {
       "csp": null

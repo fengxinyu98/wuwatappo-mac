@@ -85,6 +85,109 @@ const COOKIE_SHIM: &str = r#"
 })();
 "#;
 
+/// Routes WebSockets to Kuro hosts through `ws_proxy` (the room server only accepts
+/// the Windows Origin). Other hosts keep the native WebSocket.
+const WS_SHIM: &str = r#"
+(() => {
+  const NativeWS = window.WebSocket;
+  const PROXY_HOST = /(^|\.)(kurogames-global|kurogames|kurogame)\.com$/i;
+  const STATES = { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 };
+
+  class ProxyWebSocket extends EventTarget {
+    constructor(url, protocols) {
+      super();
+      const u = new URL(url, location.href);
+      const tauri = window.__TAURI__;
+      if (!PROXY_HOST.test(u.hostname) || !tauri?.core?.Channel) {
+        return protocols === undefined ? new NativeWS(url) : new NativeWS(url, protocols);
+      }
+      this.url = u.href;
+      this.readyState = 0;
+      this.protocol = '';
+      this.extensions = '';
+      this.bufferedAmount = 0;
+      this.binaryType = 'blob';
+      this.onopen = this.onmessage = this.onerror = this.onclose = null;
+      this._id = null;
+      this._pendingClose = null;
+      const ch = new tauri.core.Channel();
+      ch.onmessage = (ev) => this._onEvent(ev);
+      const list = protocols === undefined ? [] : [].concat(protocols);
+      tauri.core.invoke('ws_open', { url: this.url, protocols: list, onEvent: ch }).then((id) => {
+        this._id = id;
+        if (this._pendingClose) this._sendClose(...this._pendingClose);
+      }, (err) => {
+        this._fire(new Event('error'));
+        this._finish(1006, String(err), false);
+      });
+    }
+    _fire(ev) {
+      const h = this['on' + ev.type];
+      if (typeof h === 'function') { try { h.call(this, ev); } catch (e) { setTimeout(() => { throw e; }); } }
+      this.dispatchEvent(ev);
+    }
+    _finish(code, reason, wasClean) {
+      if (this.readyState === 3) return;
+      this.readyState = 3;
+      this._fire(new CloseEvent('close', { code, reason, wasClean }));
+    }
+    _onEvent(ev) {
+      switch (ev.type) {
+        case 'open':
+          if (this.readyState !== 0) return;
+          this.readyState = 1;
+          this.protocol = ev.protocol || '';
+          this._fire(new Event('open'));
+          break;
+        case 'text':
+          if (this.readyState === 1) this._fire(new MessageEvent('message', { data: ev.data }));
+          break;
+        case 'binary': {
+          if (this.readyState !== 1) return;
+          const bytes = new Uint8Array(ev.data);
+          const data = this.binaryType === 'arraybuffer' ? bytes.buffer : new Blob([bytes]);
+          this._fire(new MessageEvent('message', { data }));
+          break;
+        }
+        case 'error':
+          this._fire(new Event('error'));
+          break;
+        case 'close':
+          this._finish(ev.code, ev.reason || '', !!ev.wasClean);
+          break;
+      }
+    }
+    send(data) {
+      if (this.readyState === 0) throw new DOMException('WebSocket is still connecting', 'InvalidStateError');
+      if (this.readyState !== 1) return;
+      const invoke = window.__TAURI__.core.invoke;
+      if (typeof data === 'string') {
+        invoke('ws_send', { id: this._id, text: data });
+      } else if (data instanceof Blob) {
+        data.arrayBuffer().then((b) => invoke('ws_send', { id: this._id, binary: Array.from(new Uint8Array(b)) }));
+      } else {
+        const view = ArrayBuffer.isView(data)
+          ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+          : new Uint8Array(data);
+        invoke('ws_send', { id: this._id, binary: Array.from(view) });
+      }
+    }
+    close(code, reason) {
+      if (this.readyState >= 2) return;
+      this.readyState = 2;
+      if (this._id === null) this._pendingClose = [code, reason];
+      else this._sendClose(code, reason);
+    }
+    _sendClose(code, reason) {
+      window.__TAURI__.core.invoke('ws_close', { id: this._id, code: code ?? null, reason: reason ?? null });
+    }
+  }
+  Object.assign(ProxyWebSocket, STATES);
+  Object.assign(ProxyWebSocket.prototype, STATES);
+  window.WebSocket = ProxyWebSocket;
+})();
+"#;
+
 struct AuxSpec {
     url: &'static str,
     width: f64,
@@ -94,7 +197,8 @@ struct AuxSpec {
 
 fn aux_spec(label: &str) -> Option<AuxSpec> {
     let (url, width, height, resizable) = match label {
-        "login" => ("index.html#/login", 460.0, 640.0, false),
+        // .login-dialog-card is 500x378; the KrSDK view resizes via resize_login_window_to_content.
+        "login" => ("index.html#/login", 500.0, 378.0, false),
         "update" | "maintenance" => ("index.html#/update", 520.0, 440.0, false),
         "about" => ("index.html#/about", 520.0, 440.0, false),
         "oss-notice" => ("index.html#/oss-notice", 760.0, 560.0, true),
@@ -107,6 +211,7 @@ pub fn create_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let main = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
         .title("Wuwa Tappo")
         .initialization_script(COOKIE_SHIM)
+        .initialization_script(WS_SHIM)
         .inner_size(800.0, 600.0)
         .transparent(true)
         .decorations(false)
@@ -128,6 +233,7 @@ fn build_aux(app: &AppHandle, label: &str, spec: &AuxSpec, visible: bool) -> tau
     WebviewWindowBuilder::new(app, label, WebviewUrl::App(spec.url.into()))
         .title("Wuwa Tappo")
         .initialization_script(COOKIE_SHIM)
+        .initialization_script(WS_SHIM)
         .inner_size(spec.width, spec.height)
         .resizable(spec.resizable)
         .transparent(true)
@@ -201,6 +307,7 @@ pub fn open_panel(app: &AppHandle, tab: Option<String>) -> Result<(), String> {
     let panel = WebviewWindowBuilder::new(app, "panel", WebviewUrl::App(url.into()))
         .title("Wuwa Tappo")
         .initialization_script(COOKIE_SHIM)
+        .initialization_script(WS_SHIM)
         .inner_size(PANEL_NAV_EXPANDED_W + PANEL_CONTENT_W, PANEL_H)
         .resizable(true)
         .transparent(true)
@@ -221,6 +328,7 @@ pub fn ensure_toast(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let toast = WebviewWindowBuilder::new(app, "toast", WebviewUrl::App("index.html#/toast".into()))
         .title("Wuwa Tappo")
         .initialization_script(COOKIE_SHIM)
+        .initialization_script(WS_SHIM)
         .transparent(true)
         .decorations(false)
         .shadow(false)
