@@ -38,6 +38,53 @@ const MAIN_INIT_SCRIPT: &str = r#"
 })();
 "#;
 
+/// WebKit ignores `document.cookie` on the `tauri://` custom scheme, but the frontend
+/// keeps its login token in cookies (`kuro_infoToken`). Back `document.cookie` with
+/// localStorage, which all windows share because they have the same origin.
+const COOKIE_SHIM: &str = r#"
+(() => {
+  const KEY = '__tappo_cookies__';
+  const load = () => {
+    try { return JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch { return {}; }
+  };
+  const live = (jar) => {
+    const now = Date.now();
+    for (const k of Object.keys(jar)) if (jar[k].e !== null && jar[k].e <= now) delete jar[k];
+    return jar;
+  };
+  Object.defineProperty(document, 'cookie', {
+    configurable: true,
+    get() {
+      const jar = live(load());
+      return Object.keys(jar).map((k) => `${k}=${jar[k].v}`).join('; ');
+    },
+    set(str) {
+      const parts = String(str).split(';');
+      const first = parts.shift() || '';
+      const eq = first.indexOf('=');
+      if (eq <= 0) return;
+      const name = first.slice(0, eq).trim();
+      const value = first.slice(eq + 1).trim();
+      let exp = null;
+      for (const p of parts) {
+        const i = p.indexOf('=');
+        const attr = (i < 0 ? p : p.slice(0, i)).trim().toLowerCase();
+        const val = i < 0 ? '' : p.slice(i + 1).trim();
+        if (attr === 'max-age') exp = Date.now() + Number(val) * 1000;
+        else if (attr === 'expires' && exp === null) {
+          const t = Date.parse(val);
+          if (Number.isFinite(t)) exp = t;
+        }
+      }
+      const jar = live(load());
+      if (exp !== null && exp <= Date.now()) delete jar[name];
+      else jar[name] = { v: value, e: exp };
+      try { localStorage.setItem(KEY, JSON.stringify(jar)); } catch {}
+    },
+  });
+})();
+"#;
+
 struct AuxSpec {
     url: &'static str,
     width: f64,
@@ -59,6 +106,7 @@ fn aux_spec(label: &str) -> Option<AuxSpec> {
 pub fn create_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let main = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
         .title("Wuwa Tappo")
+        .initialization_script(COOKIE_SHIM)
         .inner_size(800.0, 600.0)
         .transparent(true)
         .decorations(false)
@@ -79,6 +127,7 @@ pub fn create_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
 fn build_aux(app: &AppHandle, label: &str, spec: &AuxSpec, visible: bool) -> tauri::Result<WebviewWindow> {
     WebviewWindowBuilder::new(app, label, WebviewUrl::App(spec.url.into()))
         .title("Wuwa Tappo")
+        .initialization_script(COOKIE_SHIM)
         .inner_size(spec.width, spec.height)
         .resizable(spec.resizable)
         .transparent(true)
@@ -151,6 +200,7 @@ pub fn open_panel(app: &AppHandle, tab: Option<String>) -> Result<(), String> {
     };
     let panel = WebviewWindowBuilder::new(app, "panel", WebviewUrl::App(url.into()))
         .title("Wuwa Tappo")
+        .initialization_script(COOKIE_SHIM)
         .inner_size(PANEL_NAV_EXPANDED_W + PANEL_CONTENT_W, PANEL_H)
         .resizable(true)
         .transparent(true)
@@ -170,6 +220,7 @@ pub fn ensure_toast(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     }
     let toast = WebviewWindowBuilder::new(app, "toast", WebviewUrl::App("index.html#/toast".into()))
         .title("Wuwa Tappo")
+        .initialization_script(COOKIE_SHIM)
         .transparent(true)
         .decorations(false)
         .shadow(false)

@@ -249,12 +249,11 @@ async fn open_panel_window(app: AppHandle, payload: Option<PanelPayload>) -> Cmd
     windows::open_panel(&app, payload.unwrap_or_default().tab)
 }
 
+/// Hide rather than destroy: the panel closes itself and then keeps running code
+/// (e.g. Settings → Login closes the panel, then opens the login window from it).
 #[tauri::command]
-async fn close_panel_window(app: AppHandle) -> CmdResult {
-    if let Some(panel) = app.get_webview_window("panel") {
-        panel.close().map_err(err)?;
-    }
-    Ok(())
+async fn close_panel_window(app: AppHandle) {
+    windows::hide(&app, "panel");
 }
 
 #[tauri::command]
@@ -492,7 +491,9 @@ pub fn run() {
                 ("main", WindowEvent::Moved(_) | WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }) => {
                     hit::refresh_geometry(app);
                 }
-                ("panel", WindowEvent::Destroyed) => {
+                ("panel", WindowEvent::CloseRequested { api, .. }) => {
+                    api.prevent_close();
+                    let _ = window.hide();
                     let _ = app.emit_to("main", "cat-panel-window-closed", Value::Null);
                 }
                 // Modal windows are reused: hide instead of destroying on Cmd+W.
