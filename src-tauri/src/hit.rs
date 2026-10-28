@@ -9,13 +9,15 @@ use serde::Deserialize;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct Rect {
     pub left: f64,
     pub top: f64,
     pub width: f64,
     pub height: f64,
+    /// Room teammate this region belongs to; native mouse events over it carry the id.
+    pub member_id: Option<serde_json::Value>,
 }
 
 impl Rect {
@@ -68,6 +70,20 @@ impl HitState {
         }
         !self.window_passthrough && self.regions.iter().any(|r| r.contains(x, y))
     }
+
+    fn member_at(&self, gx: f64, gy: f64) -> Option<serde_json::Value> {
+        let (x, y) = (gx - self.origin.0, gy - self.origin.1);
+        self.input_regions
+            .iter()
+            .chain(self.regions.iter())
+            .find(|r| r.member_id.is_some() && r.contains(x, y))
+            .and_then(|r| r.member_id.clone())
+    }
+}
+
+/// Teammate whose region is under global logical point (gx, gy), if any.
+pub fn member_at(app: &AppHandle, gx: f64, gy: f64) -> Option<serde_json::Value> {
+    app.state::<Hit>().0.lock().unwrap().member_at(gx, gy)
 }
 
 pub struct Hit(pub Mutex<HitState>);

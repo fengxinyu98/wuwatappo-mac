@@ -29,9 +29,39 @@ jobs:
         with:
           node-version: 22
 
+      # Sign with a stable self-signed identity so macOS keeps the Input Monitoring
+      # grant across updates (ad-hoc signatures change every build).
+      - name: Import signing certificate
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          KC="$RUNNER_TEMP/signing.keychain-db"
+          KC_PW="$(uuidgen)"
+          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/codesign.p12"
+          security create-keychain -p "$KC_PW" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KC_PW" "$KC"
+          security import "$RUNNER_TEMP/codesign.p12" -k "$KC" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KC_PW" "$KC"
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign \
+            -k /Library/Keychains/System.keychain tools/signing/codesign.cer
+          rm "$RUNNER_TEMP/codesign.p12"
+          security find-identity -v -p codesigning "$KC" | grep "Wuwa Tappo Personal Signing"
+
       - name: Build
         working-directory: src-tauri
+        env:
+          APPLE_SIGNING_IDENTITY: Wuwa Tappo Personal Signing
         run: npx --yes @tauri-apps/cli@2 build --target universal-apple-darwin --bundles app
+
+      - name: Verify signature
+        run: |
+          APP="src-tauri/target/universal-apple-darwin/release/bundle/macos/Wuwa Tappo.app"
+          codesign --verify --deep --strict "$APP"
+          codesign -dv "$APP" 2>&1 | grep -E "Authority|Identifier|TeamIdentifier"
+          codesign -d -r- "$APP"
 
       - name: Zip app
         run: |

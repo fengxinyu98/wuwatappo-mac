@@ -22,7 +22,11 @@ chmod +x build-mac.sh
 - **输入监控**（系统设置 → 隐私与安全性 → 输入监控）：用来统计全局键盘敲击数。
   首次启动会弹窗请求；授权后需要**退出并重新打开**应用。
 - 鼠标点击统计不需要额外权限。
-- 每次重新构建后签名会变，macOS 可能要求重新授权。
+- GitHub 构建的版本用固定的自签名证书签名（`tools/signing/codesign.cer`，私钥在仓库 Secrets
+  `MACOS_CERT_P12` 里），所以更新版本后授权会保留。本地用 `build-mac.sh` 构建的是临时签名，
+  每次都要重新授权。
+- 如果点击突然全部失效、日志里出现 `tap was disabled`，说明授权和当前签名对不上，执行
+  `tccutil reset ListenEvent com.kuro.wuwatappo.cn` 后重新打开应用并授权。
 
 ## 和 Windows 版的差异
 

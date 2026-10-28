@@ -230,6 +230,16 @@ unsafe fn read_event(etype: u32, event: Ref) -> Option<Raw> {
 fn worker(app: AppHandle, rx: Receiver<Raw>) {
     let mut last_move = Instant::now() - MOVE_EMIT_INTERVAL;
     let mut pending: Vec<Raw> = Vec::new();
+    // Teammate grabbed by the current left press; kept until release so a drag that
+    // leaves the teammate's region still routes to it.
+    let mut held_member: Option<serde_json::Value> = None;
+    let payload = |x: f64, y: f64, s: f64, member: Option<serde_json::Value>| {
+        let mut p = json!({ "x": x * s, "y": y * s });
+        if let Some(m) = member {
+            p["memberId"] = m;
+        }
+        p
+    };
     while let Ok(first) = rx.recv() {
         pending.push(first);
         pending.extend(rx.try_iter());
@@ -249,20 +259,30 @@ fn worker(app: AppHandle, rx: Receiver<Raw>) {
                     }
                     last_move = now;
                     let s = hit::scale(&app);
-                    let _ = app.emit_to("main", "mouse-move", json!({ "x": x * s, "y": y * s }));
+                    let member = held_member.clone().or_else(|| hit::member_at(&app, x, y));
+                    let _ = app.emit_to("main", "mouse-move", payload(x, y, s, member));
                 }
                 Raw::Button { button, press, x, y } => {
                     hit::update_capture(&app, Some((x, y)));
                     if hit::over_own_window(&app, x, y) {
+                        if button == "left" && !press {
+                            held_member = None;
+                        }
                         continue;
                     }
                     let s = hit::scale(&app);
-                    let action = if press { "press" } else { "release" };
-                    let _ = app.emit_to(
-                        "main",
-                        "mouse-button",
-                        json!({ "button": button, "action": action, "x": x * s, "y": y * s }),
-                    );
+                    let member = if button == "left" && press {
+                        held_member = hit::member_at(&app, x, y);
+                        held_member.clone()
+                    } else if button == "left" {
+                        held_member.take().or_else(|| hit::member_at(&app, x, y))
+                    } else {
+                        hit::member_at(&app, x, y)
+                    };
+                    let mut p = payload(x, y, s, member);
+                    p["button"] = button.into();
+                    p["action"] = if press { "press" } else { "release" }.into();
+                    let _ = app.emit_to("main", "mouse-button", p);
                 }
                 Raw::Key { name, press } => {
                     let ev = if press { "key-press" } else { "key-release" };
