@@ -1,1 +1,0 @@
-import{d as e,b as t,c as o,f as a}from"./index-DsnG26DH.js";import{_ as r}from"./_plugin-vue_export-helper-DlAUqK2U.js";const s={class:"toast-overlay-root","aria-hidden":"true"},c=e({__name:"index",setup(n){return(_,d)=>(t(),o("div",s,[a("",!0)]))}}),p=r(c,[["__scopeId","data-v-35806c2e"]]);export{p as default};

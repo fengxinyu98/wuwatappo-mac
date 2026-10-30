@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
 
-use crate::{applog, hit};
+use crate::{applog, hit, shortcuts};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -90,7 +90,8 @@ const WATCHDOG_INTERVAL: Duration = Duration::from_secs(2);
 enum Raw {
     Move { x: f64, y: f64 },
     Button { button: &'static str, press: bool, x: f64, y: f64 },
-    Key { name: String, press: bool },
+    /// `shortcut`: (Windows VK code, modifier bits) of a non-modifier key press.
+    Key { name: String, press: bool, shortcut: Option<(u32, u32)> },
     /// Press immediately followed by release (Caps Lock only reports its lock state).
     KeyTap { name: String },
 }
@@ -211,8 +212,14 @@ unsafe fn read_event(etype: u32, event: Ref) -> Option<Raw> {
             if etype == KEY_DOWN && CGEventGetIntegerValueField(event, FIELD_KEY_AUTOREPEAT) != 0 {
                 return None;
             }
-            let name = key_name(CGEventGetIntegerValueField(event, FIELD_KEY_CODE));
-            Some(Raw::Key { name, press: etype == KEY_DOWN })
+            let code = CGEventGetIntegerValueField(event, FIELD_KEY_CODE);
+            let press = etype == KEY_DOWN;
+            let shortcut = if press {
+                vk_code(code).map(|vk| (vk, shortcut_modifiers(CGEventGetFlags(event))))
+            } else {
+                None
+            };
+            Some(Raw::Key { name: key_name(code), press, shortcut })
         }
         FLAGS_CHANGED => {
             let code = CGEventGetIntegerValueField(event, FIELD_KEY_CODE);
@@ -221,7 +228,7 @@ unsafe fn read_event(etype: u32, event: Ref) -> Option<Raw> {
             if code == 57 {
                 return Some(Raw::KeyTap { name });
             }
-            Some(Raw::Key { name, press: CGEventGetFlags(event) & bit != 0 })
+            Some(Raw::Key { name, press: CGEventGetFlags(event) & bit != 0, shortcut: None })
         }
         _ => None,
     }
@@ -284,9 +291,12 @@ fn worker(app: AppHandle, rx: Receiver<Raw>) {
                     p["action"] = if press { "press" } else { "release" }.into();
                     let _ = app.emit_to("main", "mouse-button", p);
                 }
-                Raw::Key { name, press } => {
+                Raw::Key { name, press, shortcut } => {
                     let ev = if press { "key-press" } else { "key-release" };
                     let _ = app.emit_to("main", ev, name);
+                    if let Some((vk, mods)) = shortcut {
+                        shortcuts::on_key_down(&app, vk, mods);
+                    }
                 }
                 Raw::KeyTap { name } => {
                     let _ = app.emit_to("main", "key-press", name.clone());
@@ -306,6 +316,52 @@ fn modifier_bit(code: i64) -> Option<u64> {
         54 | 55 => 0x0010_0000,  // Command
         57 => 0x0001_0000,       // Caps Lock
         63 => 0x0080_0000,       // Fn
+        _ => return None,
+    })
+}
+
+/// CGEventFlags -> shortcut modifier bits (Alt=1, Ctrl=2, Shift=4, Cmd as Win=8).
+fn shortcut_modifiers(flags: u64) -> u32 {
+    [(0x0008_0000, 1), (0x0004_0000, 2), (0x0002_0000, 4), (0x0010_0000, 8)]
+        .iter()
+        .filter(|(bit, _)| flags & bit != 0)
+        .fold(0, |m, (_, v)| m | v)
+}
+
+/// macOS virtual key code -> Windows virtual-key code, for the keys the frontend's
+/// shortcut recorder can produce (letters, digits, F1-F20, named keys).
+fn vk_code(code: i64) -> Option<u32> {
+    let name = key_name(code);
+    let b = name.as_bytes();
+    if b.len() == 1 && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit()) && !(65..=92).contains(&code) {
+        return Some(b[0].to_ascii_uppercase() as u32);
+    }
+    if let Some(n) = name.strip_prefix('F').and_then(|n| n.parse::<u32>().ok()) {
+        return Some(111 + n);
+    }
+    Some(match code {
+        49 => 32,
+        116 => 33,
+        121 => 34,
+        119 => 35,
+        115 => 36,
+        123 => 37,
+        126 => 38,
+        124 => 39,
+        125 => 40,
+        114 => 45,
+        117 => 46,
+        41 => 186,
+        24 => 187,
+        43 => 188,
+        27 => 189,
+        47 => 190,
+        44 => 191,
+        50 => 192,
+        33 => 219,
+        42 => 220,
+        30 => 221,
+        39 => 222,
         _ => return None,
     })
 }

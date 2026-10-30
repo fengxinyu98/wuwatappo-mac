@@ -10,6 +10,7 @@ mod hit;
 #[cfg(target_os = "macos")]
 mod input_macos;
 mod menu;
+mod shortcuts;
 mod store;
 mod windows;
 mod ws_proxy;
@@ -214,11 +215,19 @@ fn sync_native_menu(
     pet_scale: u32,
     window_opacity: u32,
     window_passthrough: bool,
+    game_mode: Option<bool>,
 ) -> CmdResult {
     let st = {
         let shared = app.state::<Shared>();
         let mut st = shared.menu.lock().unwrap();
-        *st = MenuState { labels, pet_dock_visible, pet_scale, window_opacity, window_passthrough };
+        *st = MenuState {
+            labels,
+            pet_dock_visible,
+            pet_scale,
+            window_opacity,
+            window_passthrough,
+            game_mode: game_mode.unwrap_or(false),
+        };
         st.clone()
     };
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
@@ -486,6 +495,7 @@ pub fn run() {
         .manage(Hit(Mutex::new(HitState::default())))
         .manage(Shared::default())
         .manage(ws_proxy::WsState::default())
+        .manage(shortcuts::Shortcuts::default())
         .on_menu_event(|app, event| menu::handle_event(app, event))
         .on_window_event(|window, event| {
             let app = window.app_handle();
@@ -572,6 +582,9 @@ pub fn run() {
             ws_proxy::ws_open,
             ws_proxy::ws_send,
             ws_proxy::ws_close,
+            shortcuts::get_app_shortcuts,
+            shortcuts::set_app_shortcuts,
+            shortcuts::set_shortcut_capture,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Wuwa Tappo");

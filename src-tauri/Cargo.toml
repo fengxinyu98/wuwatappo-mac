@@ -1,6 +1,6 @@
 [package]
 name = "wuwatappo-mac"
-version = "1.0.2"
+version = "1.0.3"
 description = "macOS shell for Wuwa Tappo (personal use)"
 edition = "2021"
 

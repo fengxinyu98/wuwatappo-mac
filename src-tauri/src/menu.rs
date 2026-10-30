@@ -22,6 +22,7 @@ pub struct MenuLabels {
     pub window_size: String,
     pub window_passthrough: String,
     pub window_opacity: String,
+    pub game_mode: String,
     pub restart: String,
     pub quit: String,
     pub tray_tooltip: String,
@@ -45,6 +46,7 @@ impl MenuLabels {
             window_size: pick(&self.window_size, "桌宠大小"),
             window_passthrough: pick(&self.window_passthrough, "鼠标穿透"),
             window_opacity: pick(&self.window_opacity, "透明度"),
+            game_mode: pick(&self.game_mode, "游戏模式"),
             restart: pick(&self.restart, "重启"),
             quit: pick(&self.quit, "退出"),
             tray_tooltip: pick(&self.tray_tooltip, "Wuwa Tappo"),
@@ -59,6 +61,7 @@ pub struct MenuState {
     pub pet_scale: u32,
     pub window_opacity: u32,
     pub window_passthrough: bool,
+    pub game_mode: bool,
 }
 
 impl Default for MenuState {
@@ -69,6 +72,7 @@ impl Default for MenuState {
             pet_scale: 100,
             window_opacity: 100,
             window_passthrough: false,
+            game_mode: false,
         }
     }
 }
@@ -114,6 +118,7 @@ pub fn build(app: &AppHandle, st: &MenuState, for_dock: bool) -> tauri::Result<M
         st.window_passthrough,
         None::<&str>,
     )?;
+    let game_mode = CheckMenuItem::with_id(app, "game_mode", &l.game_mode, true, st.game_mode, None::<&str>)?;
     let restart = MenuItem::with_id(app, "restart", &l.restart, true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", &l.quit, true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
@@ -124,7 +129,7 @@ pub fn build(app: &AppHandle, st: &MenuState, for_dock: bool) -> tauri::Result<M
         app,
         &[
             &open_bag, &open_atlas, &open_exchange, &open_room, &open_settings, &sep1,
-            &toggle_pet, &size, &opacity, &passthrough, &sep2, &restart, &sep3, &quit,
+            &toggle_pet, &size, &opacity, &passthrough, &game_mode, &sep2, &restart, &sep3, &quit,
         ],
     )
 }
@@ -142,6 +147,7 @@ pub fn handle_event(app: &AppHandle, event: MenuEvent) {
         "open_settings" => emit("dock-open-panel", "setting".into()),
         "toggle_pet" => emit("tray-toggle-pet-visibility", serde_json::Value::Null),
         "window_passthrough" => emit("tray-toggle-window-passthrough", serde_json::Value::Null),
+        "game_mode" => emit("tray-toggle-game-mode", serde_json::Value::Null),
         "restart" => emit("tray-restart", serde_json::Value::Null),
         "quit" => emit("tray-quit", serde_json::Value::Null),
         _ => {
