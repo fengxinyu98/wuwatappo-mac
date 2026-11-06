@@ -1,0 +1,1 @@
+import{dX as a,dY as e,p as r,dZ as i}from"./index-CM6qA69G.js";async function o(){await a(),await e();try{await r("exit_app")}catch(t){console.error("[quitApp] exit_app failed",t)}}async function s(){await a(),await e();try{await i()}catch(t){console.error("[restartApp] relaunch failed",t)}}export{o as quitApp,s as restartApp};
